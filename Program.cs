@@ -1,8 +1,10 @@
-﻿using System.IO.Ports;
+﻿using System.Collections.Concurrent;
+using System.IO.Ports;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using AlcotrackApi;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -15,6 +17,7 @@ using static qoldau.suap.miniagent.localDb.SqlLiteDbManager;
 
 namespace suap.miniagent {
     public class Program {
+
         public static async Task Main(string[] args) {
             try {
                 var configJson = File.ReadAllText("appsettings.json");
@@ -32,40 +35,62 @@ namespace suap.miniagent {
                 }
 
                 using var logger = loggerConfiguration.CreateLogger();
+                var ukmScannerManager = new UkmScannerManager(db, logger);
+
+
                 logger.Information("Starting...");
+
+
 
                 while (true) {
                     //1. создание локальной sqlite базы на каждый день
                     db.CreateTodayDbIfNotExists(logger);
 
+                    #region чтение данных
                     foreach (var device in config.Devices) {
                         try {
+
                             //2. читаем данные и записываем в локальную бд sqlite
-                            readDataFromDeviceAndSave(device, db, logger);
+                            switch (device.Type) {
+                                case DeviceType.Plc:
+                                case DeviceType.Energy: {
+                                    readDataFromDeviceAndSave(device, db, logger);
+                                    break;
+                                }
+                                case DeviceType.Techvision: {
+                                    startScanningAndSavingUkm(ukmScannerManager, device);
+                                    break;
+                                }
+                                default:
+                                    throw new NotImplementedException(device.Type.ToString());
+                            }
+
                         } catch (Exception readDataFromDeviceEx) {
-                            logger.Information($"readDataFromDeviceAndSave error -> {readDataFromDeviceEx}");
+                            logger.Error($"readDataFromDeviceAndSave error -> {readDataFromDeviceEx}");
                         }
                     }
+                    #endregion
 
+                    #region отправка данных в AlcotrackApi
                     var httpClient = new HttpClient();
                     httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", config.BearerTokenFromAlcotrack);
                     var alcotrackApiClient = new AlcotrackApiClient(httpClient) { BaseUrl = config.AlcotrackApiUrl };
-
-                    var sentValuesCount = 0;
-                    var needToSendDeviceValues = db.GetNotSendedToAlcotrackValues(count: 10);
-                    foreach (var needToSendDeviceValue in needToSendDeviceValues) {
-                        try {
+                    try {
+                        var sentValuesCount = 0;
+                        var needToSendDeviceValues = db.GetNotSendedToAlcotrackValues(config.SentToAlcotrackValuesCount);
+                        foreach (var needToSendDeviceValue in needToSendDeviceValues) {
                             //3. Отправляем данные из локальной sqlite бд в AlcoTrack Api
                             await sentFromLocalDbToAlcotrack(db, needToSendDeviceValue, alcotrackApiClient);
                             sentValuesCount++;
-                        } catch (Exception sentFromLocalDbToAlcotrackEx) {
-                            logger.Information($"sentFromLocalDbToAlcotrack error -> {sentFromLocalDbToAlcotrackEx}");
                         }
+                        logger.Information($"Sent values count to Alcotrack Api -> {sentValuesCount}");
+                    } catch (Exception sentFromLocalDbToAlcotrackEx) {
+                        logger.Error($"sentFromLocalDbToAlcotrack error -> {sentFromLocalDbToAlcotrackEx}");
                     }
-                    logger.Information($"Sent values count to Alcotrack Api -> {sentValuesCount}");
+                    #endregion
 
 
-                    logger.Debug($"Sleep. Start after -> {config.SleepIntervalInMs} ms");
+                    logger.Information($"Sleep. Start after -> {config.SleepIntervalInMs} ms");
                     Thread.Sleep(config.SleepIntervalInMs);
                 }
 
@@ -131,7 +156,7 @@ namespace suap.miniagent {
             var deviceValues = device.Type switch {
                 DeviceType.Plc => readDataFromPlc(device, logger),
                 DeviceType.Energy => readDataFromEnergyCounter(device, logger),
-                DeviceType.Techvision => throw new NotImplementedException(),
+                DeviceType.Techvision => throw new NotImplementedException("Данные с сканеров УКМ нужно считывать постоянно через serialPort"),
                 _ => throw new NotImplementedException(),
             };
 
@@ -141,7 +166,20 @@ namespace suap.miniagent {
             }
             logger.Information($"Inserted in local db rows count -> {deviceValues.Length}");
         }
+        private static void startScanningAndSavingUkm(UkmScannerManager ukmScannerManager, Device device) {
+            foreach (var indicator in device.TechvisionIndicators) {
+                if (!ukmScannerManager.HasScanStarted(indicator)) {
+                    ukmScannerManager.StartScanning(device.ComConfig, indicator);
+                }
 
+                if(ukmScannerManager.GetScannedValuesCount(indicator) > 10) {
+                    ukmScannerManager.SaveScannedValues(indicator);
+                }
+            }
+        }
+
+
+        #region readDataFromPlc
         private static DeviceValue[] readDataFromPlc(Device device, Logger logger) {
             var bytesFromDevice = device.Model switch {
                 "S71200" => getBytesFromS71200(device.TcpConfig, logger),
@@ -159,28 +197,36 @@ namespace suap.miniagent {
                 j["DeviceIndicatorCode"] = deviceIndicatorCode;
 
                 foreach (var field in indicator.Fields) {
-                    var value = Class.FromBytesToType(field.DataType.ToString(), bytesFromDevice, field.NeedToSkipBytesFromStart, isDirectOrder: false);
 
-                    j[field.Name] = field.DataType switch {
-                        FieldDataType.Int16 => (short)value,
-                        FieldDataType.UInt16 => (ushort)value,
+                    if (field.HardValue != null) {
+                        j[field.Name] = JValue.Parse(field.HardValue.ToString());
+                    } else {
+                        var value = Class.FromBytesToType(field.DataType.ToString(), bytesFromDevice, field.NeedToSkipBytesFromStart, isDirectOrder: false);
+                        j[field.Name] = field.DataType switch {
+                            FieldDataType.Int16 => (short)value,
+                            FieldDataType.UInt16 => (ushort)value,
 
-                        FieldDataType.Int32 => (int)value,
-                        FieldDataType.UInt32 => (uint)value,
+                            FieldDataType.Int32 => (int)value,
+                            FieldDataType.UInt32 => (uint)value,
 
-                        FieldDataType.Int64 => (long)value,
-                        FieldDataType.UInt64 => (ulong)value,
+                            FieldDataType.Int64 => (long)value,
+                            FieldDataType.UInt64 => (ulong)value,
 
-                        FieldDataType.Float => (float)value,
-                        FieldDataType.Double => (double)value,
+                            FieldDataType.Float => (float)value,
+                            FieldDataType.Double => (double)value,
 
-                        FieldDataType.DatetimeS7 => ((DatetimeS7)value).GetDateTime(),
+                            FieldDataType.DatetimeS7 =>
+                                //не у всех заводов нормально настроены дата и время на plc
+                                indicator.UsePlcDateTime
+                                    ? ((DatetimeS7)value).GetDateTime()
+                                    : DateTime.Now,
 
-                        _ => throw new NotImplementedException(field.DataType.ToString())
-                    };
+                            _ => throw new NotImplementedException(field.DataType.ToString())
+                        };
+                    }
 
 
-                    logger.Debug($"{indicator.DeviceIndicatorCode} -> {field.Name}: {value}");
+                    logger.Debug($"{indicator.DeviceIndicatorCode} -> {field.Name}: {j[field.Name]}");
                 }
 
                 deviceValues.Add(new DeviceValue(DateTime.Now, tableName, j.ToString(), deviceIndicatorCode));
@@ -192,6 +238,7 @@ namespace suap.miniagent {
         private static byte[] getBytesFromS71200(TcpConfig config, Logger logger) {
             //only for test
             //return Convert.FromBase64String("AFU/aQBVNclBS0reAAAAAEFJ85LAAAAAQTSQ4cRgRA4+0sL/Qb0QwD9xlUsH6AYTBA8UAwAAAAAA");
+            //return Convert.FromBase64String("BvVdvvRIBvGQ8/NrTGEV1EbyOAA/ckhRP3Jp3Eu35NFGcjgAQiDkakIioRpBr1mGQZ/LIwfoBwQFChwMCbLZYAfoBwMEFw==");
 
             var device = new S7Series(CpuTypeEnum.S71200, config.Ip, config.Port, config.Rack, config.Slot);
             var openRes = device.Open();
@@ -199,10 +246,13 @@ namespace suap.miniagent {
             logger.Debug($"S71200: device.IsConnected: {device.IsConnected}");
             logger.Debug($"S71200: device.IsAvailable: {device.IsAvailable}");
             var resBytes = device.ReadBytes(startByteAdr: 0, count: Convert.ToInt32(config.ReadBytesCount), config.Db);
+            logger.Information($"Reading {config.ReadBytesCount} bytes from S71200 -> {config.Ip}:{config.Port}");
             return resBytes;
         }
+        #endregion
 
 
+        #region readDataFromEnergyCounter
         private static DeviceValue[] readDataFromEnergyCounter(Device device, Logger logger) {
             var deviceValues = new List<DeviceValue>();
             foreach (var indicator in device.EnergyIndicators) {
@@ -211,6 +261,7 @@ namespace suap.miniagent {
 
                 var totalKw = device.Model switch {
                     "Mercury230" => getGetTotalKwFromMercury230(device.ComConfig, indicator, logger),
+                    "Energomera301" => getGetTotalKwFromEnergomera301(device.ComConfig, indicator, logger),
                     _ => throw new NotImplementedException()
                 };
 
@@ -228,7 +279,6 @@ namespace suap.miniagent {
             }
             return deviceValues.ToArray();
         }
-
 
         public static uint getGetTotalKwFromMercury230(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
             using var port = new SerialPort(config.PortName);
@@ -251,8 +301,30 @@ namespace suap.miniagent {
             var byteArray = new List<byte> { address, reqNumber, listNumber, tarif };
             byteArray.AddRange(crc);
             var total = sendComCmd(port, byteArray);
+            logger.Information($"Energy: {energyIndicator.DeviceIndicatorCode} reading from Mercury230 -> {config.PortName}|{config.BaudRate}|{address}");
             var data = getTotalKW(total);
             data = data / 1000;
+
+            return data;
+        }   
+        public static uint getGetTotalKwFromEnergomera301(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
+            using var port = new SerialPort(config.PortName);
+            port.BaudRate = config.BaudRate;
+            port.DataBits = config.DataBits;
+            port.Parity = config.Parity;
+            port.StopBits = config.StopBits;
+            port.Open();
+
+            sendComCmd(port, new List<byte> { 0x2F, 0X3F, 0X21, 0X0D, 0X0A });
+            sendComCmd(port, new List<byte> { 0X06, 0X30, 0X35, 0X31, 0X0D, 0X0A });
+            sendComCmd(port, new List<byte> { 0X01, 0X50, 0X31, 0X02, 0X28, 0X37, 0X37, 0X37, 0X37, 0X37, 0X37, 0X29, 0X03, 0X21 });
+            var raw = sendComCmd(port, new List<byte> { 0X01, 0X52, 0X31, 0X02, 0X45, 0X54, 0X30, 0X50, 0X45, 0X28, 0X29, 0X03, 0X37 });
+            sendComCmd(port, new List<byte> { 0X01, 0X42, 0X30, 0X03, 0X75 });
+            
+            logger.Information($"Energy: {energyIndicator.DeviceIndicatorCode} reading from Energomera301 -> {config.PortName}|{config.BaudRate}");
+
+            var output = Encoding.ASCII.GetString(raw).Split('(', '.')[1];
+            var data = uint.Parse(output);
 
             return data;
         }
@@ -267,7 +339,6 @@ namespace suap.miniagent {
             }
             return answer;
         }
-
        
         private static uint getTotalKW(byte[] bytes) {
             byte[] data = bytes.Skip(1).ToArray();
@@ -284,15 +355,16 @@ namespace suap.miniagent {
                         .ToArray(), 0);
             return unchecked((uint)totalKw);
         }
+       
+        #endregion
 
     }
 
 
-    
-
-
+    #region config models
 
     public class Config {
+        public int SentToAlcotrackValuesCount { get; set; }
         public string AlcotrackApiUrl { get; set; }
         public string BearerTokenFromAlcotrack { get; set; }
         public string LocalDbFolder { get; set; }
@@ -301,22 +373,20 @@ namespace suap.miniagent {
         public bool ShowDebugLogs { get; set; }
         public Device[] Devices { get; set; }
     }
-
     public class Device {
         public string Model { get; set; }
         public DeviceType Type { get; set; }
         public TcpConfig TcpConfig { get; set; }
         public ComConfig ComConfig { get; set; }
+        public TechvisionIndicator[] TechvisionIndicators { get; set; }
         public EnergyIndicator[] EnergyIndicators { get; set; }
         public PlcIndicator[] PlcIndicators { get; set; }
     }
-
     public enum DeviceType {
         Plc,
         Energy,
         Techvision
     }
-
     public class TcpConfig {
         public string Ip { get; set; }
         public ushort Port { get; set; }
@@ -332,27 +402,27 @@ namespace suap.miniagent {
         public Parity Parity { get; set; }
         public StopBits StopBits { get; set; }
     }
-
-
+    public class TechvisionIndicator {
+        public string DeviceIndicatorCode { get; set; }
+        public TableName TableName { get; set; }
+    } 
     public class EnergyIndicator {
         public string DeviceIndicatorCode { get; set; }
         public TableName TableName { get; set; }
         public byte Mercury230DeviceAddress { get; set; }
     }
-
     public class PlcIndicator {
         public string DeviceIndicatorCode { get; set; }
+        public bool UsePlcDateTime { get; set; }
         public TableName TableName { get; set; }
         public IndicatorField[] Fields { get; set; }
     }
-
     public class IndicatorField {
         public string Name { get; set; }
         public float NeedToSkipBytesFromStart { get; set; }
+        public object HardValue { get; set; }
         public FieldDataType DataType { get; set; }
     }
-
-
     public enum FieldDataType {
         //Boolean,
         Byte,
@@ -366,8 +436,6 @@ namespace suap.miniagent {
         Int64,
         DatetimeS7,
     }
-    
-
     public enum TableName {
         TbAccBeerCounter,
         TbAccColumnStateCounter,
@@ -378,9 +446,123 @@ namespace suap.miniagent {
         TbAccStampInfo,
     }
 
+    #endregion
 
 
+    #region UkmScanerSerialPort
 
+    public class UkmScannerManager {
+        private readonly Dictionary<string, UkmScannerSerialPort> _ukmScannerSerialPorts;
+        private readonly SqlLiteDbManager _db;
+        private readonly Logger _logger;
+
+        public UkmScannerManager(SqlLiteDbManager db, Logger logger) {
+            _db = db;
+            _logger = logger;
+            _ukmScannerSerialPorts = new Dictionary<string, UkmScannerSerialPort>();
+        }
+
+
+        public bool HasScanStarted(TechvisionIndicator indicator) {
+            bool hasScanStarted;
+
+            if (!_ukmScannerSerialPorts.ContainsKey(indicator.DeviceIndicatorCode)) {
+                hasScanStarted =  false;
+            } else {
+                var scanner = _ukmScannerSerialPorts[indicator.DeviceIndicatorCode];
+                hasScanStarted =  scanner.IsOpen;
+            }
+
+            _logger.Debug($"UkmScanner: {indicator.DeviceIndicatorCode}: HasScanStarted: {hasScanStarted}");
+            return hasScanStarted;
+        }
+
+
+        public void StartScanning(ComConfig comConfig, TechvisionIndicator indicator) {
+            if (!_ukmScannerSerialPorts.ContainsKey(indicator.DeviceIndicatorCode)) {
+                var newScanner = new UkmScannerSerialPort(indicator.DeviceIndicatorCode, comConfig.PortName, comConfig.BaudRate, _logger);
+                _ukmScannerSerialPorts.Add(indicator.DeviceIndicatorCode, newScanner);
+                _logger.Debug($"UkmScanner: {indicator.DeviceIndicatorCode}: new UKM scanner added");
+            }
+
+
+            var scanner = _ukmScannerSerialPorts[indicator.DeviceIndicatorCode];
+            scanner.OpenAndStartListen();
+        }
+
+        public int GetScannedValuesCount(TechvisionIndicator indicator) {
+            var scanner = _ukmScannerSerialPorts[indicator.DeviceIndicatorCode];
+            return scanner.ScannedValues.Count;
+        }
+
+        public void SaveScannedValues(TechvisionIndicator indicator) {
+            var scanner = _ukmScannerSerialPorts[indicator.DeviceIndicatorCode];
+
+            var allScannedValueKeys = scanner.ScannedValues.Select(c => c.Key).ToArray();
+            foreach (var scannedValueKey in allScannedValueKeys) {
+                scanner.ScannedValues.Remove(scannedValueKey, out var scannedValue);
+                //insert scannedValue
+
+                var j = new JObject();
+                j["Guid"] = Guid.NewGuid().ToString();
+                j["DeviceIndicatorCode"] = indicator.DeviceIndicatorCode;
+                j["StampDate"] = scannedValue.Timestamp;
+                j["Serial"] = "";
+                j["SerialStatus"] = 0;
+                j["SequenceNumber"] = "";
+                j["SequenceNumberStatus"] = 0;
+                j["BarcodeValue"] = scannedValue.Barcode;
+                j["BarcodeStatus"] = 0;
+                var deviceValue = new DeviceValue(scannedValue.Timestamp, indicator.TableName, j.ToString(), indicator.DeviceIndicatorCode);
+                _db.Insert(deviceValue);
+            }
+
+            _logger.Debug($"UkmScanner: {indicator.DeviceIndicatorCode}: {allScannedValueKeys.Length} values saved to db");
+        }
+    }
+
+    public class UkmScannerSerialPort : SerialPort {
+
+        public readonly ConcurrentDictionary<string, UkmScannedValue> ScannedValues;
+
+        private readonly string _deviceName;
+        private readonly Logger _logger;
+        public UkmScannerSerialPort(string deviceName, string portName, int baudRate, Logger logger) : base() {
+            ScannedValues = new ConcurrentDictionary<string, UkmScannedValue>();
+            _deviceName = deviceName;
+            base.PortName = portName;
+            base.BaudRate = baudRate;
+            _logger = logger;
+
+            base.DataReceived += serialPort_DataReceived;
+        }
+
+        public void OpenAndStartListen() {
+            if (!base.IsOpen) {
+                base.Open();
+                _logger.Debug($"UkmScanner: {_deviceName}: port is opened");
+            }
+        }
+
+
+        private void serialPort_DataReceived(object sender, SerialDataReceivedEventArgs e) {
+            var barCodeContent = this.ReadLine();
+            _logger.Debug($"UkmScanner: {_deviceName}: scanned value {barCodeContent}");
+
+            if (!ScannedValues.ContainsKey(barCodeContent)) {
+                if (!ScannedValues.TryAdd(barCodeContent, new UkmScannedValue(barCodeContent, Timestamp: DateTime.Now))) {
+                    _logger.Error($"UkmScanner: {_deviceName}: can't add scanned value: {barCodeContent}");
+                }
+            }
+
+        }
+    }
+
+    public record UkmScannedValue(string Barcode, DateTime Timestamp);
+
+    #endregion
+
+    #region S71200
     public class S7Series {
 
         [NonSerialized]
@@ -790,7 +972,6 @@ namespace suap.miniagent {
         Timer,
         Counter
     }
-
     public class BlockField {
         public string Name { get; set; }
         public string Description { get; set; }
@@ -801,4 +982,6 @@ namespace suap.miniagent {
 
         public object Value { get; set; }
     }
+    #endregion
+
 }
