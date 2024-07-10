@@ -8,7 +8,9 @@ using System.Text;
 using AlcotrackApi;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using NModbus;
 using NModbus.Utility;
+using NModbus.Serial;
 using qoldau.suap.miniagent.localDb;
 using Serilog;
 using Serilog.Core;
@@ -41,10 +43,9 @@ namespace suap.miniagent {
                 logger.Information("Starting...");
 
 
-
                 while (true) {
                     //1. создание локальной sqlite базы на каждый день
-                    db.CreateTodayDbIfNotExists(logger);
+                    db.CreateTodayDbIfNotExists();
 
                     #region чтение данных
                     foreach (var device in config.Devices) {
@@ -262,6 +263,7 @@ namespace suap.miniagent {
                 var totalKw = device.Model switch {
                     "Mercury230" => getGetTotalKwFromMercury230(device.ComConfig, indicator, logger),
                     "Energomera301" => getGetTotalKwFromEnergomera301(device.ComConfig, indicator, logger),
+                    "ModbusMercury230" => getGetTotalKwFromModbusMercury230(device.ComConfig, indicator, logger),
                     _ => throw new NotImplementedException()
                 };
 
@@ -305,6 +307,39 @@ namespace suap.miniagent {
             var data = getTotalKW(total);
             data = data / 1000;
 
+            return data;
+        }   
+        
+        public static uint getGetTotalKwFromModbusMercury230(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
+            logger.Debug($"Energy: open port {config.PortName}...");
+            using var port = new SerialPort(config.PortName);
+            port.BaudRate = config.BaudRate;
+            port.DataBits = config.DataBits;
+            port.Parity = config.Parity;
+            port.StopBits = config.StopBits;
+            port.Open();
+            logger.Debug($"Energy: {config.PortName} port is open");
+
+
+            var factory = new ModbusFactory();
+            var adapter = new SerialPortAdapter(port);
+            var transport = factory.CreateRtuTransport(adapter);
+            logger.Debug($"Energy: RtuTransport created");
+            var _master = factory.CreateMaster(transport) as IModbusSerialMaster;
+            logger.Debug($"Energy: ModbusSerialMaster created");
+
+
+            byte slaveId = 1;
+            ushort startAddress = 7576;
+            ushort bitCounts = 2;
+            
+            logger.Debug($"Energy: start ReadHoldingRegisters ...");
+            ushort[] registers= (_master as IModbusSerialMaster).ReadHoldingRegisters(slaveId, startAddress, bitCounts);
+            logger.Debug($"Energy: start ReadHoldingRegisters end");
+
+
+            var data = ModbusUtility.GetUInt32(registers[1], registers[0]);
+            logger.Information($"Energy: {energyIndicator.DeviceIndicatorCode} reading from ModbusMercury230 -> {config.PortName}|{config.BaudRate}");
             return data;
         }   
         public static uint getGetTotalKwFromEnergomera301(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {

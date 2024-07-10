@@ -23,16 +23,8 @@ namespace qoldau.suap.miniagent.localDb {
             return connStr;
         }
 
-        public void CreateTodayDbIfNotExists(Logger logger) {
+        public void CreateTodayDbIfNotExists() {
             var now = DateTime.Now;
-
-            var pathToDb = getPathToDb(now);
-
-            var localDbAlreadyExists = File.Exists(pathToDb);
-            if (localDbAlreadyExists) {
-                logger.Debug($"local db already exists -> {pathToDb}");
-                return;
-            }
 
             using (var connection = new SqliteConnection(getConnStr(now))) {
                 connection.Open();
@@ -52,7 +44,6 @@ CREATE TABLE IF NOT EXISTS TbDeviceValues (
 );";
                 command.ExecuteNonQuery();
             }
-            logger.Debug($"local db created -> {pathToDb}");
         }
 
 
