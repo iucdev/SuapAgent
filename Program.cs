@@ -223,8 +223,8 @@ namespace suap.miniagent {
                             FieldDataType.UInt64 => (ulong)value,
 
                             FieldDataType.Float => field.Unit switch {
-                                Units.M3 => (float)value * 1000F,
-                                Units.Dal => (float)value * 10F,
+                                Units.M3 => (float)value * 1000d,
+                                Units.Dal => (float)value * 10d,
                                 null => (float)value,
                                 _ => throw new NotImplementedException(),
                             }, 
