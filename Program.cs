@@ -16,12 +16,14 @@ using Serilog;
 using Serilog.Core;
 using suap.miniagent.S7.Types;
 using static qoldau.suap.miniagent.localDb.SqlLiteDbManager;
+using qoldau.suap.miniagent.Mitsubishi;
 
 namespace suap.miniagent {
     public class Program {
 
         public static async Task Main(string[] args) {
             try {
+
                 var configJson = File.ReadAllText("appsettings.json");
                 var config = JsonConvert.DeserializeObject<Config>(configJson);
                 var db = new SqlLiteDbManager(config.LocalDbFolder);
@@ -184,6 +186,8 @@ namespace suap.miniagent {
         private static DeviceValue[] readDataFromPlc(Device device, Logger logger) {
             var bytesFromDevice = device.Model switch {
                 "S71200" => getBytesFromS71200(device.TcpConfig, logger),
+                "S7300" => getBytesFromS7300(device.TcpConfig, logger),
+                "MitsubishiQSeries" => getBytesFromMitsubishiQSeries(device.TcpConfig, logger),
                 _ => throw new NotImplementedException()
             };
             logger.Debug($"bytes from device in Base64 -> {Convert.ToBase64String(bytesFromDevice)}");
@@ -200,9 +204,14 @@ namespace suap.miniagent {
                 foreach (var field in indicator.Fields) {
 
                     if (field.HardValue != null) {
-                        j[field.Name] = JValue.Parse(field.HardValue.ToString());
+                        j[field.Name] = field.DataType switch {
+                            FieldDataType.DatetimeS7 => DateTime.Now,
+                            FieldDataType.Datetime => DateTime.Now,
+                            _ => JValue.Parse(field.HardValue.ToString()),
+                        };
                     } else {
-                        var value = Class.FromBytesToType(field.DataType.ToString(), bytesFromDevice, field.NeedToSkipBytesFromStart, isDirectOrder: false);
+                        var value = Class.FromBytesToType(field.DataType.ToString(), bytesFromDevice, field.NeedToSkipBytesFromStart, indicator.IsBytesInDirectOrder);
+
                         j[field.Name] = field.DataType switch {
                             FieldDataType.Int16 => (short)value,
                             FieldDataType.UInt16 => (ushort)value,
@@ -213,8 +222,19 @@ namespace suap.miniagent {
                             FieldDataType.Int64 => (long)value,
                             FieldDataType.UInt64 => (ulong)value,
 
-                            FieldDataType.Float => (float)value,
-                            FieldDataType.Double => (double)value,
+                            FieldDataType.Float => field.Unit switch {
+                                Units.M3 => (float)value * 1000F,
+                                Units.Dal => (float)value * 10F,
+                                null => (float)value,
+                                _ => throw new NotImplementedException(),
+                            }, 
+                            
+                            FieldDataType.Double => field.Unit switch {
+                                Units.M3 => (double)value * 1000d,
+                                Units.Dal => (double)value * 10d,
+                                null => (double)value,
+                                _ => throw new NotImplementedException(),
+                            },
 
                             FieldDataType.DatetimeS7 =>
                                 //не у всех заводов нормально настроены дата и время на plc
@@ -240,16 +260,90 @@ namespace suap.miniagent {
             //only for test
             //return Convert.FromBase64String("AFU/aQBVNclBS0reAAAAAEFJ85LAAAAAQTSQ4cRgRA4+0sL/Qb0QwD9xlUsH6AYTBA8UAwAAAAAA");
             //return Convert.FromBase64String("BvVdvvRIBvGQ8/NrTGEV1EbyOAA/ckhRP3Jp3Eu35NFGcjgAQiDkakIioRpBr1mGQZ/LIwfoBwQFChwMCbLZYAfoBwMEFw==");
+            //return Convert.FromBase64String("QXE7FiAAAABBbCfAwAAAAEFv82vuaDOkP3dY0kG975o/TThfQ9enBEaZ705GwB94P00fBkG+s0kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABCq/drQqXw+AfoBwsFDwg6AAAAAEDPqQAAAAAAQMxNAAAAAABAxPJYVkc4AD8ph3dBp+p4P2TWJkThBCJHoCOUR8h3Qj9MgKlBwsmlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
 
             var device = new S7Series(CpuTypeEnum.S71200, config.Ip, config.Port, config.Rack, config.Slot);
-            var openRes = device.Open();
-            logger.Debug($"S71200: device.Open(): {openRes}");
-            logger.Debug($"S71200: device.IsConnected: {device.IsConnected}");
+
+
             logger.Debug($"S71200: device.IsAvailable: {device.IsAvailable}");
-            var resBytes = device.ReadBytes(startByteAdr: 0, count: Convert.ToInt32(config.ReadBytesCount), config.Db);
+
+            if (!device.TryOpen(out var errorStr)) {
+                throw new Exception($"Can't connect to plc: {errorStr}");
+            }
+
+            logger.Debug($"S71200: device.IsConnected: {device.IsConnected}");
+
+
+            var resBytes = new List<byte>();
+
+
+            var maxPackageSizeInBytes = 200;
+
+            if (config.ReadBytesCount < maxPackageSizeInBytes) {
+                resBytes.AddRange(device.ReadBytes(startByteAdr: 0, count: Convert.ToInt32(config.ReadBytesCount), config.Db));
+            } else {
+                var lastReadByteAdr = 0;
+
+                while (lastReadByteAdr < config.ReadBytesCount) {
+                    resBytes.AddRange(device.ReadBytes(startByteAdr: lastReadByteAdr, count: maxPackageSizeInBytes, config.Db));
+
+                    lastReadByteAdr += maxPackageSizeInBytes;
+                }
+            }
+
+
             logger.Information($"Reading {config.ReadBytesCount} bytes from S71200 -> {config.Ip}:{config.Port}");
-            return resBytes;
+            return resBytes.ToArray();
         }
+
+        private static byte[] getBytesFromMitsubishiQSeries(TcpConfig config, Logger logger) {
+            //for test
+            //return Convert.FromBase64String("AQAAAAAApv8wPcehqjtRr9VAbdVB1G/s00ABAFeXOzsAAAAAWJJSvQWLB0H/8dTTL/EDQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+
+            var device = new MitsubishiQSeries(config.Ip, config.Port);
+
+            logger.Debug($"MitsubishiQSeries: device.IsAvailable: {device.IsAvailable}");
+            var bytes = device.ReadBytes();
+
+            logger.Information($"Reading {bytes.Length} bytes from MitsubishiQSeries -> {config.Ip}:{config.Port}");
+            return bytes;
+        }
+       
+        private static byte[] getBytesFromS7300(TcpConfig config, Logger logger) {
+            var device = new S7Series(CpuTypeEnum.S7300, config.Ip, config.Port, config.Rack, config.Slot);
+
+            logger.Debug($"S7300: device.IsAvailable: {device.IsAvailable}");
+
+            if (!device.TryOpen(out var errorStr)) {
+                throw new Exception($"Can't connect to plc: {errorStr}");
+            }
+
+            logger.Debug($"S7300: device.IsConnected: {device.IsConnected}");
+
+
+            var resBytes = new List<byte>();
+
+
+            var maxPackageSizeInBytes = 200;
+
+            if (config.ReadBytesCount < maxPackageSizeInBytes) {
+                resBytes.AddRange(device.ReadBytes(startByteAdr: 0, count: Convert.ToInt32(config.ReadBytesCount), config.Db));
+            } else {
+                var lastReadByteAdr = 0;
+
+                while (lastReadByteAdr < config.ReadBytesCount) {
+                    resBytes.AddRange(device.ReadBytes(startByteAdr: lastReadByteAdr, count: maxPackageSizeInBytes, config.Db));
+
+                    lastReadByteAdr += maxPackageSizeInBytes;
+                }
+            }
+
+
+            logger.Information($"Reading {config.ReadBytesCount} bytes from S7300 -> {config.Ip}:{config.Port}");
+            return resBytes.ToArray();
+        }
+       
+        
         #endregion
 
 
@@ -449,12 +543,14 @@ namespace suap.miniagent {
     public class PlcIndicator {
         public string DeviceIndicatorCode { get; set; }
         public bool UsePlcDateTime { get; set; }
+        public bool IsBytesInDirectOrder { get; set; }
         public TableName TableName { get; set; }
         public IndicatorField[] Fields { get; set; }
     }
     public class IndicatorField {
         public string Name { get; set; }
         public float NeedToSkipBytesFromStart { get; set; }
+        public Units? Unit { get; set; }
         public object HardValue { get; set; }
         public FieldDataType DataType { get; set; }
     }
@@ -470,6 +566,7 @@ namespace suap.miniagent {
         UInt64,
         Int64,
         DatetimeS7,
+        Datetime,
     }
     public enum TableName {
         TbAccBeerCounter,
@@ -479,6 +576,11 @@ namespace suap.miniagent {
         TbAccProductCounter,
         TbAccReservoirCounter,
         TbAccStampInfo,
+    }
+
+    public enum Units {
+        M3,
+        Dal,
     }
 
     #endregion
@@ -628,8 +730,8 @@ namespace suap.miniagent {
         }
 
         public bool IsConnected { get; private set; }
-        public string LastErrorString { get; private set; }
-        public PlcErrorCodesEnum LastErrorCode { get; private set; }
+        //public string LastErrorString { get; private set; }
+        //public PlcErrorCodesEnum LastErrorCode { get; private set; }
 
 
         /// <summary>
@@ -645,13 +747,13 @@ namespace suap.miniagent {
             Slot = slot;
         }
 
-        public bool Open() {
+        public bool TryOpen(out string error) {
             //_logger.Debug("S7 before opened!");
             var bReceive = new byte[256];
 
             // check if available
             if (!IsAvailable) {
-                LastErrorString = ErrorCode.IpAddressNotAvailable + $"Destination IP-Address '{Ip}' is not available!";
+                error = ErrorCode.IpAddressNotAvailable + $"Destination IP-Address '{Ip}' is not available!";
                 return (IsConnected = false);
             }
 
@@ -664,7 +766,7 @@ namespace suap.miniagent {
                 var server = new IPEndPoint(IPAddress.Parse(Ip), Port);
                 _mSocket.Connect(server);
             } catch (Exception ex) {
-                LastErrorString = ErrorCode.ConnectionError + ex.Message;
+                error = ErrorCode.ConnectionError + ex.Message;
                 return (IsConnected = false);
             }
 
@@ -710,6 +812,7 @@ namespace suap.miniagent {
                         bSend1[18] = (byte)(Rack * 2 * 16 + Slot);
                         break;
                     default:
+                        error = "CpuType unknow";
                         return (IsConnected = false);
                 }
 
@@ -727,11 +830,12 @@ namespace suap.miniagent {
                     throw new Exception(ErrorCode.WrongNumberReceivedBytes.ToString());
                 }
             } catch (Exception e) {
-                LastErrorString = ErrorCode.ConnectionError + $"Couldn't establish the connection to {Ip}! Exception {e.StackTrace}";
+                error = ErrorCode.ConnectionError + $"Couldn't establish the connection to {Ip}! Exception {e}";
                 IsConnected = false;
                 return (IsConnected = false);
             }
 
+            error = null;
             return IsConnected = true;
         }
 
@@ -747,133 +851,6 @@ namespace suap.miniagent {
             return ReadBytes(DataType.DataBlock, db, startByteAdr, count);
         }
 
-        /// <summary>
-        /// Read a class from plc. Only properties are readed
-        /// </summary>
-        /// <param name="sourceClass">Instance of the class that will store the values</param>       
-        /// <param name="db">Index of the DB; es.: 1 is for DB1</param>
-        public void ReadClass(object sourceClass, int db) {
-            Type classType = sourceClass.GetType();
-            var numBytes = Class.GetClassSize(classType);
-            // now read the package. DATABLOCK?
-            var bytes = (byte[])Read(DataType.DataBlock, db, 0, VarType.Byte, numBytes);
-            // and decode it
-           Class.FromBytes(sourceClass, classType, bytes);
-        }
-
-        public void ReadClass(object sourceClass, int db, int startByteAdr) {
-            Type classType = sourceClass.GetType();
-            int numBytes = Class.GetClassSize(classType);
-            // now read the package
-            var bytes = (byte[])Read(DataType.DataBlock, db, startByteAdr, VarType.Byte, numBytes);
-            //foreach (var b in bytes)
-            //    _logger.Debug("byte : {0:X2}", b);
-
-            // and decode it
-            Class.FromBytes(sourceClass, classType, bytes);
-        }
-
-
-        private object Read(DataType dataType, int db, int startByteAdr, VarType varType, int varCount) {
-            byte[] bytes = null;
-            int cntBytes = 0;
-
-            switch (varType) {
-                case VarType.Byte:
-                    cntBytes = varCount;
-                    if (cntBytes < 1)
-                        cntBytes = 1;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-                    if (varCount == 1)
-                        return bytes[0];
-                    else
-                        return bytes;
-                case VarType.Word:
-                    cntBytes = varCount * 2;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return Word.FromByteArray(bytes);
-                    else
-                        return Word.ToArray(bytes);
-                case VarType.Int:
-                    cntBytes = varCount * 2;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return Int.FromByteArray(bytes);
-                    else
-                        return Int.ToArray(bytes);
-                case VarType.DWord:
-                    cntBytes = varCount * 4;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return DWord.FromByteArray(bytes);
-                    else
-                        return DWord.ToArray(bytes);
-                case VarType.DInt:
-                    cntBytes = varCount * 4;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return DInt.FromByteArray(bytes);
-                    else
-                        return DInt.ToArray(bytes);
-                case VarType.Real:
-                    cntBytes = varCount * 4;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return S7.Types.Double.FromByteArray(bytes);
-                    else
-                        return S7.Types.Double.ToArray(bytes);
-                case VarType.String:
-                    cntBytes = varCount;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    return S7.Types.String.FromByteArray(bytes);
-                case VarType.Timer:
-                    cntBytes = varCount * 2;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return S7.Types.Timer.FromByteArray(bytes);
-                    else
-                        return S7.Types.Timer.ToArray(bytes);
-                case VarType.Counter:
-                    cntBytes = varCount * 2;
-                    bytes = ReadBytes(dataType, db, startByteAdr, cntBytes);
-                    if (bytes == null)
-                        return null;
-
-                    if (varCount == 1)
-                        return Counter.FromByteArray(bytes);
-                    else
-                        return Counter.ToArray(bytes);
-                default:
-                    return null;
-            }
-        }
-
-
-        #region OldReadBytes
         private byte[] ReadBytes(DataType dataType, int db, int startByteAdr, int count) {
             var bytes = new byte[count];
             try {
@@ -931,15 +908,12 @@ namespace suap.miniagent {
                 return bytes;
             } catch (SocketException socketException) {
                 IsConnected = false;
-                LastErrorString = ErrorCode.WriteData + socketException.ToString();
-                return null;
+                throw;
             } catch (Exception exc) {
-                LastErrorString = ErrorCode.WriteData + exc.ToString();
-                return null;
+                throw;
             }
         }
 
-        #endregion
         
         public void Dispose() {
             if (_mSocket != null) {

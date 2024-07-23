@@ -697,6 +697,39 @@
                     var datetimeS7Value = Struct.FromBytes(typeof(DatetimeS7), bytes.Skip(bytePos).Take(12).ToArray());
                     return datetimeS7Value;
 
+                case "Datetime":
+                    bytePos = (int)Math.Floor(position);
+                    bytePos = (position - bytePos) <= 0 ? bytePos : ++bytePos;
+
+                    if (isDirectOrder) {
+                        sourceBytes = new[]
+                        {
+                            bytes[bytePos + 0],
+                            bytes[bytePos + 1],
+                            bytes[bytePos + 2],
+                            bytes[bytePos + 3],
+                            bytes[bytePos + 4],
+                            bytes[bytePos + 5],
+                            bytes[bytePos + 6],
+                            bytes[bytePos + 7]
+                        };
+                    } else {
+                        sourceBytes = new[]
+                        {
+                            bytes[bytePos + 7],
+                            bytes[bytePos + 6],
+                            bytes[bytePos + 5],
+                            bytes[bytePos + 4],
+                            bytes[bytePos + 3],
+                            bytes[bytePos + 2],
+                            bytes[bytePos + 1],
+                            bytes[bytePos + 0]
+                        };
+                    }
+                    var date = (new DateTime(1970, 1, 1)).AddMilliseconds(BitConverter.ToDouble(sourceBytes, 0));
+                    return date;
+
+
                 default: throw new NotImplementedException();
             };
         }
