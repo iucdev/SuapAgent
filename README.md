@@ -71,3 +71,8 @@
 |--------------------------------|
 ```
 
+```
+	sc.exe delete "Qoldau Alcotrack Agent Service"
+	sc.exe create "Qoldau Alcotrack Agent Service" binpath= "D:\Work\SuapAgent\bin\release\net6.0\win-x64\qoldau.suap.miniagent.exe D:\Work\SuapAgent\bin\release\net6.0\win-x64" start=auto
+	sc.exe failure "Qoldau Alcotrack Agent Service" reset= 0 actions= restart/0/restart/0/restart/0
+```

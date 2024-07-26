@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS TbDeviceValues (
 
 
         public void Insert(DeviceValue deviceValue) {
+            if (!File.Exists(getPathToDb(DateTime.Now))) {
+                CreateTodayDbIfNotExists();
+            }
+
             using (var connection = new SqliteConnection(getConnStr(DateTime.Now))) {
                 connection.Open();
 
@@ -71,6 +75,10 @@ CREATE TABLE IF NOT EXISTS TbDeviceValues (
 
 
         public void MarkUsSentToAlcotrack(int id, DateTime sentDate) {
+            if (!File.Exists(getPathToDb(DateTime.Now))) {
+                CreateTodayDbIfNotExists();
+            }
+
             using (var connection = new SqliteConnection(getConnStr(DateTime.Now))) {
                 connection.Open();
 
@@ -88,10 +96,11 @@ WHERE _id = @flId";
             }
         }
 
-
-
-
         public NeedToSendDeviceValue[] GetNotSendedToAlcotrackValues(int count) {
+            if (!File.Exists(getPathToDb(DateTime.Now))) {
+                CreateTodayDbIfNotExists();
+            }
+
             var values = new List<NeedToSendDeviceValue>();
             using (var connection = new SqliteConnection(getConnStr(DateTime.Now))) {
                 connection.Open();
@@ -119,7 +128,6 @@ LIMIT {count};";
 
             return values.ToArray();
         }
-
 
         public record NeedToSendDeviceValue(int Id, TableName TableName, string Json, string DeviceIndicatorCode);
         public record DeviceValue(DateTime StampDate, TableName TableName, string Json, string DeviceIndicatorCode, DateTime? SentToAlcoTrackDate = null, bool IsSentToAlcoTrack = false);
