@@ -22,9 +22,8 @@ using System.ServiceProcess;
 namespace suap.miniagent {
     public sealed class AgentService {
 
-        public  async Task CollectAndSendData(Config config, Logger logger) {
+        public  async Task CollectAndSendData(SqlLiteDbManager db, Config config, ILogger logger) {
             try {
-                var db = new SqlLiteDbManager(config.LocalDbFolder);
                 var ukmScannerManager = new UkmScannerManager(db, logger);
 
                 logger.Information("Starting...");
@@ -44,7 +43,9 @@ namespace suap.miniagent {
                                 break;
                             }
                             case DeviceType.Techvision: {
-                                startScanningAndSavingUkm(ukmScannerManager, device);
+                                if(device.ComConfig != null) {
+                                    startComScanningAndSavingUkm(ukmScannerManager, device);
+                                }
                                 break;
                             }
                             default:
@@ -131,7 +132,7 @@ namespace suap.miniagent {
             db.MarkUsSentToAlcotrack(needToSendDeviceValue.Id, sentDate: DateTime.Now);
         }
 
-        private static void readDataFromDeviceAndSave(Device device, SqlLiteDbManager db, Logger logger) {
+        private static void readDataFromDeviceAndSave(Device device, SqlLiteDbManager db, ILogger logger) {
             var deviceValues = device.Type switch {
                 DeviceType.Plc => readDataFromPlc(device, logger),
                 DeviceType.Energy => readDataFromEnergyCounter(device, logger),
@@ -145,7 +146,7 @@ namespace suap.miniagent {
             }
             logger.Information($"Inserted in local db rows count -> {deviceValues.Length}");
         }
-        private static void startScanningAndSavingUkm(UkmScannerManager ukmScannerManager, Device device) {
+        private static void startComScanningAndSavingUkm(UkmScannerManager ukmScannerManager, Device device) {
             foreach (var indicator in device.TechvisionIndicators) {
                 if (!ukmScannerManager.HasScanStarted(indicator)) {
                     ukmScannerManager.StartScanning(device.ComConfig, indicator);
@@ -159,7 +160,7 @@ namespace suap.miniagent {
 
 
         #region readDataFromPlc
-        private static DeviceValue[] readDataFromPlc(Device device, Logger logger) {
+        private static DeviceValue[] readDataFromPlc(Device device, ILogger logger) {
             var bytesFromDevice = device.Model switch {
                 "S71200" => getBytesFromS71200(device.TcpConfig, logger),
                 "S7300" => getBytesFromS7300(device.TcpConfig, logger),
@@ -232,7 +233,7 @@ namespace suap.miniagent {
             return deviceValues.ToArray();
         }
 
-        private static byte[] getBytesFromS71200(TcpConfig config, Logger logger) {
+        private static byte[] getBytesFromS71200(TcpConfig config, ILogger logger) {
             //only for test
             //return Convert.FromBase64String("AFU/aQBVNclBS0reAAAAAEFJ85LAAAAAQTSQ4cRgRA4+0sL/Qb0QwD9xlUsH6AYTBA8UAwAAAAAA");
             //return Convert.FromBase64String("BvVdvvRIBvGQ8/NrTGEV1EbyOAA/ckhRP3Jp3Eu35NFGcjgAQiDkakIioRpBr1mGQZ/LIwfoBwQFChwMCbLZYAfoBwMEFw==");
@@ -272,9 +273,9 @@ namespace suap.miniagent {
             return resBytes.ToArray();
         }
 
-        private static byte[] getBytesFromMitsubishiQSeries(TcpConfig config, Logger logger) {
+        private static byte[] getBytesFromMitsubishiQSeries(TcpConfig config, ILogger logger) {
             //for test
-            //return Convert.FromBase64String("AQAAAAAApv8wPcehqjtRr9VAbdVB1G/s00ABAFeXOzsAAAAAWJJSvQWLB0H/8dTTL/EDQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+            return Convert.FromBase64String("AQAAAAAApv8wPcehqjtRr9VAbdVB1G/s00ABAFeXOzsAAAAAWJJSvQWLB0H/8dTTL/EDQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
 
             var device = new MitsubishiQSeries(config.Ip, config.Port);
 
@@ -285,7 +286,7 @@ namespace suap.miniagent {
             return bytes;
         }
 
-        private static byte[] getBytesFromS7300(TcpConfig config, Logger logger) {
+        private static byte[] getBytesFromS7300(TcpConfig config, ILogger logger) {
             var device = new S7Series(CpuTypeEnum.S7300, config.Ip, config.Port, config.Rack, config.Slot);
 
             logger.Debug($"S7300: device.IsAvailable: {device.IsAvailable}");
@@ -324,7 +325,7 @@ namespace suap.miniagent {
 
 
         #region readDataFromEnergyCounter
-        private static DeviceValue[] readDataFromEnergyCounter(Device device, Logger logger) {
+        private static DeviceValue[] readDataFromEnergyCounter(Device device, ILogger logger) {
             var deviceValues = new List<DeviceValue>();
             foreach (var indicator in device.EnergyIndicators) {
                 var deviceIndicatorCode = indicator.DeviceIndicatorCode;
@@ -352,7 +353,7 @@ namespace suap.miniagent {
             return deviceValues.ToArray();
         }
 
-        public static uint getGetTotalKwFromMercury230(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
+        public static uint getGetTotalKwFromMercury230(ComConfig config, EnergyIndicator energyIndicator, ILogger logger) {
             using var port = new SerialPort(config.PortName);
             port.BaudRate = config.BaudRate;
             port.DataBits = config.DataBits;
@@ -380,7 +381,7 @@ namespace suap.miniagent {
             return data;
         }
 
-        public static uint getGetTotalKwFromModbusMercury230(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
+        public static uint getGetTotalKwFromModbusMercury230(ComConfig config, EnergyIndicator energyIndicator, ILogger logger) {
             logger.Debug($"Energy: open port {config.PortName}...");
             using var port = new SerialPort(config.PortName);
             port.BaudRate = config.BaudRate;
@@ -412,7 +413,7 @@ namespace suap.miniagent {
             logger.Information($"Energy: {energyIndicator.DeviceIndicatorCode} reading from ModbusMercury230 -> {config.PortName}|{config.BaudRate}");
             return data;
         }
-        public static uint getGetTotalKwFromEnergomera301(ComConfig config, EnergyIndicator energyIndicator, Logger logger) {
+        public static uint getGetTotalKwFromEnergomera301(ComConfig config, EnergyIndicator energyIndicator, ILogger logger) {
             using var port = new SerialPort(config.PortName);
             port.BaudRate = config.BaudRate;
             port.DataBits = config.DataBits;
@@ -567,9 +568,9 @@ namespace suap.miniagent {
     public class UkmScannerManager {
         private readonly Dictionary<string, UkmScannerSerialPort> _ukmScannerSerialPorts;
         private readonly SqlLiteDbManager _db;
-        private readonly Logger _logger;
+        private readonly ILogger _logger;
 
-        public UkmScannerManager(SqlLiteDbManager db, Logger logger) {
+        public UkmScannerManager(SqlLiteDbManager db, ILogger logger) {
             _db = db;
             _logger = logger;
             _ukmScannerSerialPorts = new Dictionary<string, UkmScannerSerialPort>();
@@ -639,8 +640,8 @@ namespace suap.miniagent {
         public readonly ConcurrentDictionary<string, UkmScannedValue> ScannedValues;
 
         private readonly string _deviceName;
-        private readonly Logger _logger;
-        public UkmScannerSerialPort(string deviceName, string portName, int baudRate, Logger logger) : base() {
+        private readonly ILogger _logger;
+        public UkmScannerSerialPort(string deviceName, string portName, int baudRate, ILogger logger) : base() {
             ScannedValues = new ConcurrentDictionary<string, UkmScannedValue>();
             _deviceName = deviceName;
             base.PortName = portName;
