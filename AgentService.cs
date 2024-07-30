@@ -43,6 +43,7 @@ namespace suap.miniagent {
                                 break;
                             }
                             case DeviceType.Techvision: {
+                                //только для com подключений
                                 if(device.ComConfig != null) {
                                     startComScanningAndSavingUkm(ukmScannerManager, device);
                                 }
@@ -275,7 +276,7 @@ namespace suap.miniagent {
 
         private static byte[] getBytesFromMitsubishiQSeries(TcpConfig config, ILogger logger) {
             //for test
-            return Convert.FromBase64String("AQAAAAAApv8wPcehqjtRr9VAbdVB1G/s00ABAFeXOzsAAAAAWJJSvQWLB0H/8dTTL/EDQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+            //return Convert.FromBase64String("AQAAAAAApv8wPcehqjtRr9VAbdVB1G/s00ABAFeXOzsAAAAAWJJSvQWLB0H/8dTTL/EDQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
 
             var device = new MitsubishiQSeries(config.Ip, config.Port);
 

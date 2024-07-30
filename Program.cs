@@ -10,6 +10,7 @@ using suap.miniagent;
 internal class Program {
     private static void Main(string[] args) {
         if(args.Length > 0) {
+            //меняем рабочую папку
             Environment.CurrentDirectory = args[0];
         }
 

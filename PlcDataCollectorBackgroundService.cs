@@ -33,7 +33,7 @@ namespace qoldau.suap.miniagent {
             } catch (OperationCanceledException) {
                 Environment.Exit(0);
             } catch (Exception ex) {
-                _logger.Error(ex, "{Message}", ex.Message);
+                _logger.Error(ex, "PlcDataCollectorBackground exeption");
                 Environment.Exit(1);
             }
         }
