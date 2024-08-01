@@ -270,6 +270,7 @@ namespace suap.miniagent {
             }
 
 
+            device.Close();
             logger.Information($"Reading {config.ReadBytesCount} bytes from S71200 -> {config.Ip}:{config.Port}");
             return resBytes.ToArray();
         }
@@ -302,7 +303,7 @@ namespace suap.miniagent {
             var resBytes = new List<byte>();
 
 
-            var maxPackageSizeInBytes = 200;
+            var maxPackageSizeInBytes = 222;
 
             if (config.ReadBytesCount < maxPackageSizeInBytes) {
                 resBytes.AddRange(device.ReadBytes(startByteAdr: 0, count: Convert.ToInt32(config.ReadBytesCount), config.Db));
@@ -310,13 +311,23 @@ namespace suap.miniagent {
                 var lastReadByteAdr = 0;
 
                 while (lastReadByteAdr < config.ReadBytesCount) {
-                    resBytes.AddRange(device.ReadBytes(startByteAdr: lastReadByteAdr, count: maxPackageSizeInBytes, config.Db));
+
+                    var readCount = maxPackageSizeInBytes;
+                    if((config.ReadBytesCount - lastReadByteAdr) < maxPackageSizeInBytes) {
+                        readCount = Convert.ToInt32(config.ReadBytesCount - lastReadByteAdr);
+                    }
+
+                    var bytes = device.ReadBytes(startByteAdr: lastReadByteAdr, count: readCount, config.Db);
+                    resBytes.AddRange(bytes);
+                   
+                    logger.Debug($"Reading from S7300 bytes from: {lastReadByteAdr}; readCount: {readCount}");
+                    logger.Debug($"Readed from S7300 bytes count: {bytes.Length}");
 
                     lastReadByteAdr += maxPackageSizeInBytes;
                 }
             }
 
-
+            device.Close();
             logger.Information($"Reading {config.ReadBytesCount} bytes from S7300 -> {config.Ip}:{config.Port}");
             return resBytes.ToArray();
         }

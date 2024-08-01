@@ -71,6 +71,7 @@
 |--------------------------------|
 ```
 
+Регистрация как win-сервис
 ```
 	sc.exe delete "Qoldau Alcotrack Agent Service"
 	sc.exe create "Qoldau Alcotrack Agent Service" binpath= "D:\Work\SuapAgent\bin\release\net6.0\win-x64\qoldau.suap.miniagent.exe D:\Work\SuapAgent\bin\release\net6.0\win-x64" start=auto
